@@ -1,0 +1,223 @@
+diff --git a/lib/pages/login/cookie_login_dialog.dart b/lib/pages/login/cookie_login_dialog.dart
+new file mode 100644
+index 0000000..cf0cb5b
+--- /dev/null
++++ b/lib/pages/login/cookie_login_dialog.dart
+@@ -0,0 +1,91 @@
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
++import 'package:get/get.dart';
++import 'package:pilipala/utils/login.dart';
++
++/// 使用 Cookie 登录（移植自 PiliPlus）
++class CookieLoginDialog extends StatefulWidget {
++  const CookieLoginDialog({super.key});
++
++  @override
++  State<CookieLoginDialog> createState() => _CookieLoginDialogState();
++}
++
++class _CookieLoginDialogState extends State<CookieLoginDialog> {
++  final TextEditingController _cookieController = TextEditingController();
++  bool _loading = false;
++
++  @override
++  void dispose() {
++    _cookieController.dispose();
++    super.dispose();
++  }
++
++  Future<void> _login() async {
++    final String cookie = _cookieController.text.trim();
++    if (cookie.isEmpty) {
++      SmartDialog.showToast('Cookie 不能为空');
++      return;
++    }
++    setState(() => _loading = true);
++    final bool success = await LoginUtils.loginByCookie(cookie);
++    if (!mounted) return;
++    setState(() => _loading = false);
++    if (success) {
++      Get.back(); // 关闭本弹窗
++      Get.back(); // 关闭登录页
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return AlertDialog(
++      title: const Text('使用 Cookie 登录'),
++      contentPadding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
++      content: SingleChildScrollView(
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            const Text(
++              '需包含 SESSDATA、bili_jct、DedeUserID，缺一不可',
++              style: TextStyle(fontSize: 12),
++            ),
++            const SizedBox(height: 12),
++            TextField(
++              controller: _cookieController,
++              minLines: 3,
++              maxLines: 8,
++              style: const TextStyle(fontSize: 13),
++              inputFormatters: [
++                FilteringTextInputFormatter.deny(RegExp(r'\s')),
++              ],
++              decoration: const InputDecoration(
++                hintText: 'SESSDATA=xxx;bili_jct=xxx;DedeUserID=xxx;...',
++                border: OutlineInputBorder(),
++                isDense: true,
++              ),
++            ),
++          ],
++        ),
++      ),
++      actions: [
++        TextButton(
++          onPressed: () => Get.back(),
++          child: const Text('取消'),
++        ),
++        FilledButton(
++          onPressed: _loading ? null : _login,
++          child: _loading
++              ? const SizedBox(
++                  width: 18,
++                  height: 18,
++                  child: CircularProgressIndicator(strokeWidth: 2),
++                )
++              : const Text('登录'),
++        ),
++      ],
++    );
++  }
++}
+diff --git a/lib/pages/login/view.dart b/lib/pages/login/view.dart
+index 4fe2179..8c1176e 100644
+--- a/lib/pages/login/view.dart
++++ b/lib/pages/login/view.dart
+@@ -3,6 +3,7 @@ import 'package:get/get.dart';
+ import 'package:qr_flutter/qr_flutter.dart';
+ 
+ import 'controller.dart';
++import 'cookie_login_dialog.dart';
+ 
+ class LoginPage extends StatefulWidget {
+   const LoginPage({super.key});
+@@ -41,6 +42,13 @@ class _LoginPageState extends State<LoginPage> {
+                 ),
+         ),
+         actions: [
++          IconButton(
++            tooltip: 'Cookie 登录',
++            onPressed: () {
++              Get.dialog(const CookieLoginDialog());
++            },
++            icon: const Icon(Icons.cookie_outlined, size: 20),
++          ),
+           IconButton(
+             tooltip: '浏览器打开',
+             onPressed: () {
+diff --git a/lib/utils/login.dart b/lib/utils/login.dart
+index 2687a8c..f90c0f7 100644
+--- a/lib/utils/login.dart
++++ b/lib/utils/login.dart
+@@ -1,4 +1,5 @@
+ import 'dart:convert';
++import 'dart:io';
+ import 'dart:math';
+ 
+ import 'package:crypto/crypto.dart';
+@@ -7,6 +8,8 @@ import 'package:flutter/services.dart';
+ import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
+ import 'package:get/get.dart';
+ import 'package:hive/hive.dart';
++import 'package:pilipala/http/constants.dart';
++import 'package:pilipala/http/init.dart';
+ import 'package:pilipala/http/user.dart';
+ import 'package:pilipala/pages/dynamics/index.dart';
+ import 'package:pilipala/pages/home/index.dart';
+@@ -64,6 +67,80 @@ class LoginUtils {
+     return 'XY${uuid.substring(0, 35).toUpperCase()}';
+   }
+ 
++  /// 解析一整段 Cookie 文本（`a=1; b=2;` 或换行分隔均可）
++  /// 统一挂到 .bilibili.com 域，www / api / vc 各个子域都能命中
++  static List<Cookie> parseCookie(String rawCookie) {
++    final List<Cookie> cookies = [];
++    for (final String item in rawCookie.split(RegExp(r';|\n'))) {
++      final String text = item.trim();
++      if (text.isEmpty) continue;
++      final int index = text.indexOf('=');
++      if (index <= 0) continue;
++      final String name = text.substring(0, index).trim();
++      final String value = text.substring(index + 1).trim();
++      if (name.isEmpty || value.isEmpty) continue;
++      cookies.add(
++        Cookie(name, value)
++          ..domain = '.bilibili.com'
++          ..path = '/'
++          ..httpOnly = false,
++      );
++    }
++    return cookies;
++  }
++
++  /// 直接用 Cookie 登录（移植自 PiliPlus 的「使用Cookie登录」）
++  /// 返回 true 表示登录成功
++  static Future<bool> loginByCookie(String rawCookie) async {
++    final List<Cookie> cookies = parseCookie(rawCookie);
++    if (cookies.isEmpty || !cookies.any((e) => e.name == 'SESSDATA')) {
++      SmartDialog.showToast('Cookie 格式不正确，至少要包含 SESSDATA');
++      return false;
++    }
++    SmartDialog.showLoading(msg: '登录中...');
++    try {
++      // 1. 写入本地 cookie 仓库
++      await Request.cookieManager.cookieJar
++          .saveFromResponse(Uri.parse(HttpString.baseUrl), cookies);
++
++      // 2. 同步到全局请求头，保证接下来的校验请求带上
++      final List<Cookie> all = await Request.cookieManager.cookieJar
++          .loadForRequest(Uri.parse(HttpString.baseUrl));
++      Request.dio.options.headers['cookie'] =
++          all.map((e) => '${e.name}=${e.value}').join('; ');
++      Request.buvid = null; // 让 buvid 重新读取
++
++      // 3. 校验 Cookie 是否有效
++      final dynamic result = await UserHttp.userInfo();
++      if (result['status'] != true || result['data'].isLogin != true) {
++        SmartDialog.dismiss();
++        SmartDialog.showToast(result['msg'] ?? 'Cookie 已失效，请重新获取');
++        return false;
++      }
++
++      // 4. 保存用户信息 + 刷新各页面登录状态
++      Box userInfoCache = GStrorage.userInfo;
++      if (!userInfoCache.isOpen) {
++        userInfoCache = await Hive.openBox('userInfo');
++      }
++      await userInfoCache.put('userInfoCache', result['data']);
++
++      final HomeController homeCtr = Get.find<HomeController>();
++      homeCtr.updateLoginStatus(true);
++      homeCtr.userFace.value = result['data'].face;
++      Get.find<MediaController>().mid = result['data'].mid;
++      await LoginUtils.refreshLoginStatus(true);
++
++      SmartDialog.dismiss();
++      SmartDialog.showToast('登录成功');
++      return true;
++    } catch (e) {
++      SmartDialog.dismiss();
++      SmartDialog.showToast('登录失败：$e');
++      return false;
++    }
++  }
++
+   static confirmLogin(url, controller) async {
+     var content = '';
+     if (url != null) {
